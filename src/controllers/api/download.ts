@@ -1,6 +1,12 @@
 import { Response, Request, NextFunction } from "express";
-import { RequestPromise, RequestPromiseOptions } from "request-promise-native";
+import { RequestPromiseOptions } from "request-promise-native";
 import rp from "request-promise-native";
+import { resolve as path_resolve } from "path";
+import { existsSync, write } from "fs";
+
+import { assureDirExists, writeToFile } from "../../_internal/fs";
+
+const TMP_DIR = path_resolve(__dirname, "../../../tmp");
 
 // rp.defaults({ jar: true });
 const COOKIE_JAR = rp.jar();
@@ -44,6 +50,24 @@ const DATA = {
 
 const URL_GC_LOGIN = "https://sso.garmin.com/sso/login?" + urlencode(DATA);
 const URL_GC_POST_AUTH = "https://connect.garmin.com/modern/activities?";
+const URL_GC_SEARCH =
+  "https://connect.garmin.com/proxy/activity-search-service-1.2/json/activities?start=0&limit=1";
+const URL_GC_LIST =
+  "https://connect.garmin.com/modern/proxy/activitylist-service/activities/search/activities?";
+const URL_GC_ACTIVITY =
+  "https://connect.garmin.com/modern/proxy/activity-service/activity/";
+const URL_GC_DEVICE =
+  "https://connect.garmin.com/modern/proxy/device-service/deviceservice/app-info/";
+const URL_GC_ACT_PROPS =
+  "https://connect.garmin.com/modern/main/js/properties/activity_types/activity_types.properties";
+const URL_GC_EVT_PROPS =
+  "https://connect.garmin.com/modern/main/js/properties/event_types/event_types.properties";
+const URL_GC_GPX_ACTIVITY =
+  "https://connect.garmin.com/modern/proxy/download-service/export/gpx/activity/";
+const URL_GC_TCX_ACTIVITY =
+  "https://connect.garmin.com/modern/proxy/download-service/export/tcx/activity/";
+const URL_GC_ORIGINAL_ACTIVITY =
+  "http://connect.garmin.com/proxy/download-service/files/activity/";
 
 export let download = (req: Request, res: Response, next: NextFunction) => {
   res.write("Welcome to Garmin Connect Exporter!\n\n");
@@ -54,9 +78,140 @@ export let download = (req: Request, res: Response, next: NextFunction) => {
       return res.end("Failed to login. Please enter 'username' and 'password'");
     }
 
-    res.end("downloading end");
+    // We should be logged in now.
+    assureDirExists(TMP_DIR);
+
+    do_download(res, args).then(result => res.end("Done!"));
   });
 };
+
+async function do_download(res: Response, args: any): Promise<any> {
+  let total_to_download: number;
+  if (args.count === "all") {
+  } else {
+    total_to_download = +args.count || 1;
+  }
+  let total_downloaded = 0;
+  let num_to_download = 0;
+
+  // This while loop will download data from the server in multiple chunks, if necessary.
+  while (total_downloaded < total_to_download) {
+    // Maximum chunk size 'LIMIT_MAXIMUM' ... 400 return status if over maximum.  So download
+    // maximum or whatever remains if less than maximum.
+    // As of 2018-03-06 I get return status 500 if over maximum
+    if (total_to_download - total_downloaded > LIMIT_MAXIMUM)
+      num_to_download = LIMIT_MAXIMUM;
+    else num_to_download = total_to_download - total_downloaded;
+
+    const search_params = { start: total_downloaded, limit: num_to_download };
+    // Query Garmin Connect
+    res.write(
+      "Making activity request ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n"
+    );
+    res.write(URL_GC_LIST + urlencode(search_params) + "\n\n");
+    const result = await http_req(URL_GC_LIST + urlencode(search_params));
+
+    res.write(
+      "Finished activity request ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n"
+    );
+
+    const activities: any[] = JSON.parse(result.body);
+    // res.write(JSON.stringify(activities[0]) + "\n\n");
+
+    // Process each activity.
+    activities.forEach(a => {
+      // Display which entry we're working on.
+      res.write("Garmin Connect activity: [" + a["activityId"] + "] \n");
+      res.write(a["activityName"] + "\n\n");
+
+      // Retrieve also the detail data from the activity (the one displayed on
+      // the https://connect.garmin.com/modern/activity/xxx page), because some
+      // data are missing from 'a' (or are even different, e.g. for my activities
+      // 86497297 or 86516281)
+
+      // const res2 = await http_req(URL_GC_ACTIVITY + a["activityId"]);
+      // const activity_details = JSON.parse(res2.body);
+      // res.write(JSON.stringify(activity_details) + "\n\n");
+
+      // EPOCの書き出し
+      const { aerobicTrainingEffect, anaerobicTrainingEffect } = a;
+      writeToFile(
+        TMP_DIR + "/activity_" + a["activityId"] + ".json",
+        JSON.stringify({
+          activityId: a["activityId"],
+          aerobicTrainingEffect,
+          anaerobicTrainingEffect
+        })
+      );
+
+      export_data_file(res, a["activityId"], args);
+    });
+
+    total_downloaded += num_to_download;
+  }
+
+  return true;
+}
+
+async function export_data_file(res: Response, activity_id: string, args: any) {
+  const format = args.format || "tcx";
+  let data_filename: string;
+  let download_url: string;
+
+  if (format === "tcx") {
+    data_filename = TMP_DIR + "/activity_" + activity_id + ".tcx";
+    download_url = URL_GC_TCX_ACTIVITY + activity_id + "?full=true";
+  } else {
+    throw new Error("Unrecognized format. " + format);
+  }
+
+  if (existsSync(data_filename)) {
+    res.write("\tData file already exists; skipping...\n\n");
+    return;
+  }
+
+  if (format != "json") {
+    // Download the data file from Garmin Connect. If the download fails (e.g., due to timeout),
+    // this script will die, but nothing will have been written to disk about this activity, so
+    // just running it again should pick up where it left off.
+    res.write("\tDownloading file...\n\n");
+
+    let data;
+    try {
+      data = await http_req(download_url);
+    } catch (e) {
+      // Handle expected (though unfortunate) error codes; die on unexpected ones.
+      if (e.code == 500 && format == "tcx") {
+        // Garmin will give an internal server error (HTTP 500) when downloading TCX files
+        // if the original was a manual GPX upload. Writing an empty file prevents this file
+        // from being redownloaded, similar to the way GPX files are saved even when there
+        // are no tracks. One could be generated here, but that's a bit much. Use the GPX
+        // format if you want actual data in every file, as I believe Garmin provides a GPX
+        // file for every activity.
+        res.write(
+          "Writing empty file since Garmin did not generate a TCX file for this activity...\n\n"
+        );
+        data = "";
+      } else if (e.code == 404 && format == "original") {
+        // For manual activities (i.e., entered in online without a file upload), there is
+        // no original file. # Write an empty file to prevent redownloading it.
+        res.write(
+          "Writing empty file since there was no original activity data...\n\n"
+        );
+        data = "";
+      } else
+        throw new Error(
+          "Failed. Got an unexpected HTTP error (" +
+            e.code +
+            download_url +
+            ")."
+        );
+    }
+
+    // Persist file
+    writeToFile(data_filename, data.body);
+  }
+}
 
 async function login_to_garmin_connect(
   res: Response,
@@ -91,9 +246,9 @@ async function login_to_garmin_connect(
       );
     const login_ticket = match[1];
 
-    res.write("login ticket=" + login_ticket);
-    http_req(URL_GC_POST_AUTH + "ticket=" + login_ticket);
-    res.write("Finished authentication");
+    res.write("login ticket=" + login_ticket + "\n\n");
+    await http_req(URL_GC_POST_AUTH + "ticket=" + login_ticket);
+    res.write("Finished authentication\n\n");
 
     return true;
   }
@@ -131,10 +286,10 @@ async function http_req(url: string, post: any = null, headers = {}) {
   return response;
 }
 
-function urlencode(data: { [key: string]: string }): string {
+function urlencode(data: { [key: string]: string | number }): string {
   const strArr: string[] = [];
   Object.keys(data).forEach(key => {
-    strArr.push(key + "=" + encodeURIComponent(data[key]));
+    strArr.push(key + "=" + encodeURIComponent(data[key] + ""));
   });
   return strArr.join("&");
 }
