@@ -19,16 +19,21 @@ export function assureDirExists(...dirs: string[]): void {
   });
 }
 
-export function writeToFile(filepath: string, data: string) {
+export function writeToFile(filepath: string, data: string): Promise<boolean> {
   assureDirExists(path.resolve(filepath, "../"));
-  fs.open(filepath, "w", err => {
-    if (err) {
-      console.error(err);
-    }
-    fs.writeFile(filepath, data, err => {
+  return new Promise((resolve, reject) => {
+    fs.open(filepath, "w", err => {
       if (err) {
-        console.error(err);
+        // console.error(err);
+        reject(err);
       }
+      fs.writeFile(filepath, data, err => {
+        if (err) {
+          // console.error(err);
+          reject(err);
+        }
+        resolve(true);
+      });
     });
   });
 }

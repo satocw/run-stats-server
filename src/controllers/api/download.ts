@@ -8,15 +8,12 @@ import { assureDirExists, writeToFile } from "../../_internal/fs";
 
 const TMP_DIR = path_resolve(__dirname, "../../../tmp");
 
-// rp.defaults({ jar: true });
 const COOKIE_JAR = rp.jar();
 
 // Maximum number of activities you can request at once.
 // Used to be 100 and enforced by Garmin for older endpoints; for the current endpoint 'URL_GC_LIST'
 // the limit is not known (I have less than 1000 activities and could get them all in one go)
 const LIMIT_MAXIMUM = 1000;
-
-const MAX_TRIES = 3;
 
 const WEBHOST = "https://connect.garmin.com";
 const REDIRECT = "https://connect.garmin.com/post-auth/login";
@@ -81,11 +78,17 @@ export let download = (req: Request, res: Response, next: NextFunction) => {
     // We should be logged in now.
     assureDirExists(TMP_DIR);
 
-    do_download(res, args).then(result => res.end("Done!"));
+    do_download(res, args).then(success => {
+      if (success) {
+        res.end("Done!");
+      } else {
+        res.end("Error Downloading Files...");
+      }
+    });
   });
 };
 
-async function do_download(res: Response, args: any): Promise<any> {
+async function do_download(res: Response, args: any): Promise<boolean> {
   let total_to_download: number;
   if (args.count === "all") {
   } else {
@@ -93,6 +96,7 @@ async function do_download(res: Response, args: any): Promise<any> {
   }
   let total_downloaded = 0;
   let num_to_download = 0;
+  const promises: Promise<boolean>[] = [];
 
   // This while loop will download data from the server in multiple chunks, if necessary.
   while (total_downloaded < total_to_download) {
@@ -135,25 +139,37 @@ async function do_download(res: Response, args: any): Promise<any> {
 
       // EPOCの書き出し
       const { aerobicTrainingEffect, anaerobicTrainingEffect } = a;
-      writeToFile(
-        TMP_DIR + "/activity_" + a["activityId"] + ".json",
-        JSON.stringify({
-          activityId: a["activityId"],
-          aerobicTrainingEffect,
-          anaerobicTrainingEffect
-        })
+      promises.push(
+        writeToFile(
+          TMP_DIR + "/activity_" + a["activityId"] + ".json",
+          JSON.stringify({
+            activityId: a["activityId"],
+            aerobicTrainingEffect,
+            anaerobicTrainingEffect
+          })
+        )
       );
 
-      export_data_file(res, a["activityId"], args);
+      promises.push(export_data_file(res, a["activityId"], args));
     });
 
     total_downloaded += num_to_download;
   }
 
-  return true;
+  return Promise.all(promises)
+    .then(() => {
+      return true;
+    })
+    .catch(() => {
+      return false;
+    });
 }
 
-async function export_data_file(res: Response, activity_id: string, args: any) {
+async function export_data_file(
+  res: Response,
+  activity_id: string,
+  args: any
+): Promise<boolean> {
   const format = args.format || "tcx";
   let data_filename: string;
   let download_url: string;
@@ -167,7 +183,7 @@ async function export_data_file(res: Response, activity_id: string, args: any) {
 
   if (existsSync(data_filename)) {
     res.write("\tData file already exists; skipping...\n\n");
-    return;
+    return false;
   }
 
   if (format != "json") {
@@ -209,7 +225,7 @@ async function export_data_file(res: Response, activity_id: string, args: any) {
     }
 
     // Persist file
-    writeToFile(data_filename, data.body);
+    return writeToFile(data_filename, data.body);
   }
 }
 
