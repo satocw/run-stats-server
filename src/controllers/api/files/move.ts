@@ -1,6 +1,6 @@
 import { Response, Request, NextFunction } from "express";
-import { readdir, readFile, rename } from "fs";
-import { extname, resolve as path_resolve } from "path";
+import { readdir, readFile, rename, existsSync } from "fs";
+import { extname, basename, resolve as path_resolve } from "path";
 import { parseString } from "xml2js";
 
 import { assureDirExists, writeToFile } from "../../../_internal/fs";
@@ -57,18 +57,42 @@ const readTCXFile = (filepath: string) => {
           reject("Error parseString");
         }
 
+        const oldFileName = basename(filepath, ".tcx");
         const newFileName = toStartDateStr(result);
-        rename(
-          filepath,
-          path_resolve(DATA_TCX_DIR, "201808", newFileName + ".tcx"),
-          err => {
-            if (err) {
-              reject("Error rename: " + filepath);
-            }
-          }
-        );
+        const newDirName = newFileName.slice(0, 7).replace(".", "");
+        const newTcxDir = path_resolve(DATA_TCX_DIR, newDirName);
+        assureDirExists(newTcxDir);
 
-        resolve(toStartDateStr(result));
+        // TCXファイルはファイル名はそのままで移動する
+        rename(filepath, path_resolve(newTcxDir, oldFileName + ".tcx"), err => {
+          if (err) {
+            reject("Error rename: " + filepath);
+          }
+        });
+
+        // メタデータファイルはファイル名を変える
+        const metaFilePath = path_resolve(DATA_TMP_DIR, oldFileName + ".json");
+        if (existsSync(metaFilePath)) {
+          const newMetaDir = path_resolve(DATA_META_DIR, newDirName);
+          assureDirExists(newMetaDir);
+          rename(
+            metaFilePath,
+            path_resolve(newMetaDir, newFileName + ".json"),
+            err => {
+              if (err) {
+                reject("Error rename meta: " + filepath);
+              }
+            }
+          );
+        }
+
+        resolve(
+          // ファイル名を変えてjson形式で保存する
+          writeToFile(
+            path_resolve(DATA_JSON_DIR, newDirName, newFileName + ".json"),
+            JSON.stringify(result)
+          )
+        );
       });
     });
   });
