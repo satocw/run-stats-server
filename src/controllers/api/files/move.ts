@@ -1,5 +1,5 @@
 import { Response, Request, NextFunction } from "express";
-import { readdir, readFile } from "fs";
+import { readdir, readFile, rename } from "fs";
 import { extname, resolve as path_resolve } from "path";
 import { parseString } from "xml2js";
 
@@ -10,7 +10,6 @@ import {
   DATA_JSON_DIR,
   DATA_META_DIR
 } from "../../../util/constants";
-import { parseDate } from "../../../../node_modules/@types/tough-cookie";
 
 export let move = (req: Request, res: Response, next: NextFunction) => {
   move_(DATA_TMP_DIR, DATA_TCX_DIR, DATA_JSON_DIR, DATA_META_DIR)
@@ -57,6 +56,17 @@ const readTCXFile = (filepath: string) => {
         if (err) {
           reject("Error parseString");
         }
+
+        const newFileName = toStartDateStr(result);
+        rename(
+          filepath,
+          path_resolve(DATA_TCX_DIR, "201808", newFileName + ".tcx"),
+          err => {
+            if (err) {
+              reject("Error rename: " + filepath);
+            }
+          }
+        );
 
         resolve(toStartDateStr(result));
       });
