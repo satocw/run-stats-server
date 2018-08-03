@@ -1,12 +1,10 @@
 import { Response, Request, NextFunction } from "express";
 import { RequestPromiseOptions } from "request-promise-native";
 import rp from "request-promise-native";
-import { resolve as path_resolve } from "path";
-import { existsSync, write } from "fs";
+import { existsSync } from "fs";
 
-import { assureDirExists, writeToFile } from "../../_internal/fs";
-
-const TMP_DIR = path_resolve(__dirname, "../../../tmp");
+import { assureDirExists, writeToFile } from "../../../_internal/fs";
+import { DATA_TMP_DIR } from "../../../util/constants";
 
 const COOKIE_JAR = rp.jar();
 
@@ -69,26 +67,35 @@ const URL_GC_ORIGINAL_ACTIVITY =
 export let download = (req: Request, res: Response, next: NextFunction) => {
   res.write("Welcome to Garmin Connect Exporter!\n\n");
 
-  const args = req.query;
-  login_to_garmin_connect(res, args).then(success => {
-    if (!success) {
-      return res.end("Failed to login. Please enter 'username' and 'password'");
-    }
+  download_(req.query)
+    .then(r => res.end(r))
+    .catch(er => res.end(er));
+};
 
-    // We should be logged in now.
-    assureDirExists(TMP_DIR);
-
-    do_download(res, args).then(success => {
-      if (success) {
-        res.end("Done!");
-      } else {
-        res.end("Error Downloading Files...");
+export let download_ = (args: any) => {
+  return new Promise((resolve, reject) => {
+    login_to_garmin_connect(args).then(success => {
+      if (!success) {
+        return reject(
+          "Failed to login. Please enter 'username' and 'password'"
+        );
       }
+
+      // We should be logged in now.
+      assureDirExists(DATA_TMP_DIR);
+
+      do_download(args).then(success => {
+        if (success) {
+          resolve("Done!");
+        } else {
+          resolve("Error Downloading Files...");
+        }
+      });
     });
   });
 };
 
-async function do_download(res: Response, args: any): Promise<boolean> {
+async function do_download(args: any): Promise<boolean> {
   let total_to_download: number;
   if (args.count === "all") {
   } else {
@@ -109,13 +116,13 @@ async function do_download(res: Response, args: any): Promise<boolean> {
 
     const search_params = { start: total_downloaded, limit: num_to_download };
     // Query Garmin Connect
-    res.write(
+    console.log(
       "Making activity request ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n"
     );
-    res.write(URL_GC_LIST + urlencode(search_params) + "\n\n");
+    console.log(URL_GC_LIST + urlencode(search_params) + "\n\n");
     const result = await http_req(URL_GC_LIST + urlencode(search_params));
 
-    res.write(
+    console.log(
       "Finished activity request ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n"
     );
 
@@ -125,8 +132,8 @@ async function do_download(res: Response, args: any): Promise<boolean> {
     // Process each activity.
     activities.forEach(a => {
       // Display which entry we're working on.
-      res.write("Garmin Connect activity: [" + a["activityId"] + "] \n");
-      res.write(a["activityName"] + "\n\n");
+      console.log("Garmin Connect activity: [" + a["activityId"] + "] \n");
+      console.log(a["activityName"] + "\n\n");
 
       // Retrieve also the detail data from the activity (the one displayed on
       // the https://connect.garmin.com/modern/activity/xxx page), because some
@@ -137,11 +144,11 @@ async function do_download(res: Response, args: any): Promise<boolean> {
       // const activity_details = JSON.parse(res2.body);
       // res.write(JSON.stringify(activity_details) + "\n\n");
 
-      // EPOCの書き出し
+      // EPOCをメタファイルに書き出し
       const { aerobicTrainingEffect, anaerobicTrainingEffect } = a;
       promises.push(
         writeToFile(
-          TMP_DIR + "/activity_" + a["activityId"] + ".json",
+          DATA_TMP_DIR + "/activity_" + a["activityId"] + ".json",
           JSON.stringify({
             activityId: a["activityId"],
             aerobicTrainingEffect,
@@ -150,7 +157,7 @@ async function do_download(res: Response, args: any): Promise<boolean> {
         )
       );
 
-      promises.push(export_data_file(res, a["activityId"], args));
+      promises.push(export_data_file(a["activityId"], args));
     });
 
     total_downloaded += num_to_download;
@@ -166,7 +173,6 @@ async function do_download(res: Response, args: any): Promise<boolean> {
 }
 
 async function export_data_file(
-  res: Response,
   activity_id: string,
   args: any
 ): Promise<boolean> {
@@ -175,14 +181,14 @@ async function export_data_file(
   let download_url: string;
 
   if (format === "tcx") {
-    data_filename = TMP_DIR + "/activity_" + activity_id + ".tcx";
+    data_filename = DATA_TMP_DIR + "/activity_" + activity_id + ".tcx";
     download_url = URL_GC_TCX_ACTIVITY + activity_id + "?full=true";
   } else {
     throw new Error("Unrecognized format. " + format);
   }
 
   if (existsSync(data_filename)) {
-    res.write("\tData file already exists; skipping...\n\n");
+    console.log("\tData file already exists; skipping...\n\n");
     return false;
   }
 
@@ -190,7 +196,7 @@ async function export_data_file(
     // Download the data file from Garmin Connect. If the download fails (e.g., due to timeout),
     // this script will die, but nothing will have been written to disk about this activity, so
     // just running it again should pick up where it left off.
-    res.write("\tDownloading file...\n\n");
+    console.log("\tDownloading file...\n\n");
 
     let data;
     try {
@@ -204,14 +210,14 @@ async function export_data_file(
         // are no tracks. One could be generated here, but that's a bit much. Use the GPX
         // format if you want actual data in every file, as I believe Garmin provides a GPX
         // file for every activity.
-        res.write(
+        console.log(
           "Writing empty file since Garmin did not generate a TCX file for this activity...\n\n"
         );
         data = "";
       } else if (e.code == 404 && format == "original") {
         // For manual activities (i.e., entered in online without a file upload), there is
         // no original file. # Write an empty file to prevent redownloading it.
-        res.write(
+        console.log(
           "Writing empty file since there was no original activity data...\n\n"
         );
         data = "";
@@ -229,15 +235,12 @@ async function export_data_file(
   }
 }
 
-async function login_to_garmin_connect(
-  res: Response,
-  args: any
-): Promise<boolean> {
+async function login_to_garmin_connect(args: any): Promise<boolean> {
   if (args.username && args.password) {
     // Initially, we need to get a valid session cookie, so we pull the login page.
-    res.write("Request login page\n\n");
+    console.log("Request login page\n\n");
     await http_req(URL_GC_LOGIN);
-    res.write("Finish login page\n\n");
+    console.log("Finish login page\n\n");
 
     // Now we'll actually login.
     // Fields that are passed in a typical Garmin login.
@@ -250,9 +253,9 @@ async function login_to_garmin_connect(
       displayNameRequired: "false"
     };
 
-    res.write("Post login data\n\n");
+    console.log("Post login data\n\n");
     const login_response = await http_req(URL_GC_LOGIN, post_data);
-    res.write("Finish login post\n\n");
+    console.log("Finish login post\n\n");
 
     const pattern = /\?ticket=(.*)\"/g;
     const match = pattern.exec(login_response.body);
@@ -262,9 +265,9 @@ async function login_to_garmin_connect(
       );
     const login_ticket = match[1];
 
-    res.write("login ticket=" + login_ticket + "\n\n");
+    console.log("login ticket=" + login_ticket + "\n\n");
     await http_req(URL_GC_POST_AUTH + "ticket=" + login_ticket);
-    res.write("Finished authentication\n\n");
+    console.log("Finished authentication\n\n");
 
     return true;
   }
